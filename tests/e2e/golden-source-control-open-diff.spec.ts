@@ -19,10 +19,10 @@ test('@golden opens an unstaged file diff from Source Control', async ({
 }) => {
   const fixture = createGoldenWorktree(testRepoPath, 'open-diff')
   registerPostElectronShutdownCleanup(async () => cleanupGoldenWorktree(testRepoPath, fixture))
+  seedGoldenSourceEdit(fixture.worktreePath)
 
   await waitForSessionReady(orcaPage)
   await openGoldenSourceControl(orcaPage, testRepoPath, fixture)
-  seedGoldenSourceEdit(fixture.worktreePath)
 
   const changedFile = orcaPage
     .locator('[data-testid="source-control-entry"]')
@@ -49,4 +49,29 @@ test('@golden opens an unstaged file diff from Source Control', async ({
   const probe = orcaPage.getByRole('button', { name: /Source Control/ })
   await probe.focus()
   await expect(probe).toBeFocused()
+})
+
+test('@golden offers to reveal a changed file in the OS file manager from its Source Control row', async ({
+  orcaPage,
+  testRepoPath,
+  registerPostElectronShutdownCleanup
+}) => {
+  const fixture = createGoldenWorktree(testRepoPath, 'reveal-row')
+  registerPostElectronShutdownCleanup(async () => cleanupGoldenWorktree(testRepoPath, fixture))
+  seedGoldenSourceEdit(fixture.worktreePath)
+
+  await waitForSessionReady(orcaPage)
+  await openGoldenSourceControl(orcaPage, testRepoPath, fixture)
+
+  const changedFile = orcaPage
+    .locator('[data-testid="source-control-entry"]')
+    .filter({ hasText: path.basename(GOLDEN_CHANGED_PATH) })
+  await expect(changedFile).toBeVisible({ timeout: 15_000 })
+  await changedFile.click({ button: 'right' })
+
+  await expect(
+    orcaPage.getByRole('menuitem', {
+      name: /Reveal in Finder|Reveal in File Explorer|Open Containing Folder/
+    })
+  ).toBeEnabled()
 })

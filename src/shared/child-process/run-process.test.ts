@@ -16,6 +16,24 @@ describe('resolveSpawn', () => {
     }
   })
 
+  it('preserves IPC serialization while hiding the worker on every platform', () => {
+    for (const platform of ['win32', 'darwin', 'linux'] as const) {
+      for (const serialization of ['json', 'advanced'] as const) {
+        const resolved = resolveSpawn(
+          { program: process.execPath, stdio: ['pipe', 'pipe', 'pipe', 'ipc'], serialization },
+          platform
+        )
+        expect(resolved.options.serialization).toBe(serialization)
+        expect(resolved.options.stdio).toEqual(['pipe', 'pipe', 'pipe', 'ipc'])
+        expect(resolved.options.windowsHide).toBe(true)
+        expect(resolved.options.shell).toBe(false)
+      }
+    }
+    expect(
+      resolveSpawn({ program: process.execPath }, 'linux').options.serialization
+    ).toBeUndefined()
+  })
+
   it('spawns a non-cmd program directly, letting Node do the argv quoting', () => {
     // Node's own Windows quoting is already CommandLineToArgvW-correct for real
     // executables; re-implementing it here would add risk for no gain.
@@ -96,6 +114,27 @@ describe('runProcessSync', () => {
     })
     expect(result.stdout).toBe('hi')
     expect(result.code).toBe(3)
+  })
+})
+
+describe('bounded output', () => {
+  it('reports a clipped answer instead of passing it off as the whole one', async () => {
+    const result = await runProcess({
+      program: process.execPath,
+      args: ['-e', 'process.stdout.write("x".repeat(64))'],
+      maxOutputBytes: 8
+    })
+    expect(result.stdout).toBe('xxxxxxxx')
+    expect(result.outputTruncated).toBe(true)
+  })
+
+  it('does not call output that exactly fills the cap truncated', async () => {
+    const result = await runProcess({
+      program: process.execPath,
+      args: ['-e', 'process.stdout.write("x".repeat(8))'],
+      maxOutputBytes: 8
+    })
+    expect(result.outputTruncated).toBe(false)
   })
 })
 

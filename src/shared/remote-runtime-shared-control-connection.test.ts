@@ -22,7 +22,10 @@ afterEach(closeSharedControlTestServers)
 describe('RemoteRuntimeSharedControlConnection', () => {
   it('routes multiple one-shot RPCs over one authenticated WebSocket', async () => {
     const server = await createServer()
-    const connection = new RemoteRuntimeSharedControlConnection(server.pairing)
+    const states: string[] = []
+    const connection = new RemoteRuntimeSharedControlConnection(server.pairing, {
+      onDiagnosticsChanged: ({ state }) => states.push(state)
+    })
 
     const first = await connection.request('worktree.ps', undefined, 1000)
     const second = await connection.request('session.tabs.listAll', null, 1000)
@@ -39,8 +42,9 @@ describe('RemoteRuntimeSharedControlConnection', () => {
       'worktree.ps',
       'session.tabs.listAll'
     ])
-
-    connection.close()
+    expect((connection.close(), states)).toEqual(
+      expect.arrayContaining(['awaiting_ready', 'ready', 'closed'])
+    )
   })
 
   it('preserves orchestration authority fields on shared-control requests', async () => {
@@ -679,7 +683,59 @@ describe('RemoteRuntimeSharedControlConnection', () => {
       pendingRequestCount: 0,
       lastClose: { code: 4001, reason: 'test close' }
     })
-
+    connection.pauseStandingRetry()
+    expect(connection.getDiagnostics()).toMatchObject({ state: 'closed' })
     connection.close()
   })
+})
+
+it('cancels a pending subscription setup without canceling a sibling on the shared connection', async () => {
+  const server = await createServer({ suppressReadyFrame: true })
+  const connection = new RemoteRuntimeSharedControlConnection(server.pairing)
+  const controller = new AbortController()
+  const callbacks = { onResponse: vi.fn(), onError: vi.fn() }
+  try {
+    const pending = connection.subscribe(
+      'files.watch',
+      { worktree: 'one' },
+      10_000,
+      callbacks,
+      controller.signal
+    )
+    const abandoned = expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    const sibling = connection.subscribe('files.watch', { worktree: 'two' }, 10_000, callbacks)
+    const siblingClosed = expect(sibling).rejects.toThrow('Remote Orca runtime')
+    await vi.waitFor(() => expect(server.connectionCount()).toBe(1))
+    controller.abort()
+    await abandoned
+    expect(connection.getDiagnostics()).toMatchObject({ subscriptionCount: 1 })
+    expect(server.requests).toEqual([])
+    connection.close()
+    await siblingClosed
+    expect(connection.getDiagnostics()).toMatchObject({ subscriptionCount: 0 })
+  } finally {
+    connection.close()
+  }
+})
+
+it('creates no connection or subscription for a pre-aborted setup', async () => {
+  const server = await createServer()
+  const connection = new RemoteRuntimeSharedControlConnection(server.pairing)
+  const controller = new AbortController()
+  controller.abort()
+  try {
+    await expect(
+      connection.subscribe(
+        'files.watch',
+        {},
+        10_000,
+        { onResponse: vi.fn(), onError: vi.fn() },
+        controller.signal
+      )
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(server.connectionCount()).toBe(0)
+    expect(connection.getDiagnostics()).toMatchObject({ subscriptionCount: 0 })
+  } finally {
+    connection.close()
+  }
 })

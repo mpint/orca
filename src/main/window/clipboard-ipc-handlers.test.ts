@@ -25,6 +25,7 @@ const {
   clipboardReadBufferMock,
   clipboardWriteTextMock,
   clipboardReadImageMock,
+  clipboardAvailableFormatsMock,
   clipboardWriteImageMock,
   clipboardWriteBufferMock,
   nativeImageCreateFromBufferMock,
@@ -60,6 +61,7 @@ const {
   clipboardReadBufferMock: vi.fn(),
   clipboardWriteTextMock: vi.fn(),
   clipboardReadImageMock: vi.fn(),
+  clipboardAvailableFormatsMock: vi.fn(),
   clipboardWriteImageMock: vi.fn(),
   clipboardWriteBufferMock: vi.fn(),
   nativeImageCreateFromBufferMock: vi.fn(),
@@ -82,9 +84,7 @@ vi.mock('node:fs/promises', () => ({
   stat: fsStatMock,
   realpath: vi.fn(), // unused here; only satisfies filesystem-path-containment's named import
   writeFile: fsWriteFileMock,
-  default: {
-    writeFile: fsWriteFileMock
-  }
+  default: { writeFile: fsWriteFileMock, mkdir: fsMkdirMock }
 }))
 
 vi.mock('../ipc/filesystem-auth', () => ({
@@ -106,6 +106,7 @@ vi.mock('electron', () => ({
     readBuffer: clipboardReadBufferMock,
     writeText: clipboardWriteTextMock,
     readImage: clipboardReadImageMock,
+    availableFormats: clipboardAvailableFormatsMock,
     writeImage: clipboardWriteImageMock,
     writeBuffer: clipboardWriteBufferMock
   },
@@ -315,7 +316,7 @@ describe('registerClipboardHandlers', () => {
     ).resolves.toEqual({ ok: true })
 
     expect(fsStatMock).toHaveBeenCalledWith('/tmp/copied-file.txt')
-    expect(resolveAuthorizedPathMock).toHaveBeenCalledWith('/tmp/copied-file.txt', {})
+    expect(resolveAuthorizedPathMock.mock.calls[0]?.[0]).toBe('/tmp/copied-file.txt')
     if (process.platform === 'darwin') {
       expect(clipboardWriteBufferMock).toHaveBeenCalledWith(
         'public.file-url',
@@ -548,30 +549,9 @@ describe('registerClipboardHandlers', () => {
     expect(removeHandlerMock).toHaveBeenCalledWith('clipboard:writeImage')
     expect(removeHandlerMock).toHaveBeenCalledWith('clipboard:writeFile')
     expect(removeHandlerMock).toHaveBeenCalledWith('clipboard:saveImageAsTempFile')
-  })
-
-  it('saves clipboard images to a local temp file when no connection is provided', async () => {
-    const png = Buffer.from([0, 1, 2, 3])
-    const expectedPath = join(
-      '/tmp',
-      'orca-paste-1760000000000-00000000-0000-4000-8000-000000000000.png'
-    )
-    clipboardReadImageMock.mockReturnValue({
-      getSize: () => ({ height: 1, width: 1 }),
-      isEmpty: () => false,
-      toPNG: () => png
-    })
-
-    registerClipboardHandlers({} as never)
-
-    const handlers = getRegisteredHandlers()
-    await expect(
-      handlers.get('clipboard:saveImageAsTempFile')?.(makeClipboardEvent(), undefined)
-    ).resolves.toBe(expectedPath)
-    expect(fsWriteFileMock).toHaveBeenCalledWith(expectedPath, png)
-    expect(clipboardReadBufferMock).not.toHaveBeenCalled()
-    expect(fsOpenMock).not.toHaveBeenCalled()
-    expect(getSshFilesystemProviderMock).not.toHaveBeenCalled()
+    expect(removeHandlerMock).toHaveBeenCalledWith('clipboard:readImageThumbnail')
+    expect(removeHandlerMock).toHaveBeenCalledWith('clipboard:hasImage')
+    expect(removeHandlerMock).toHaveBeenCalledWith('clipboard:readFilePaths')
   })
 
   it('does not inspect FileNameW when an empty image clipboard is read outside Windows', async () => {
@@ -893,5 +873,19 @@ describe('registerClipboardHandlers', () => {
 
     expect(nativeImageCreateFromBufferMock).toHaveBeenCalled()
     expect(clipboardWriteImageMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [['text/plain'], false],
+    [['text/plain', 'image/png'], true]
+  ])('reports image presence for %j from the format list without decoding', (formats, expected) => {
+    setTrustedClipboardRendererWebContentsId(17)
+    clipboardAvailableFormatsMock.mockReturnValue(formats)
+    // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: registering handlers never reads the store for clipboard image presence.
+    registerClipboardHandlers({} as never)
+    const probe = getRegisteredHandlers().get('clipboard:hasImage')
+    expect(probe?.(makeClipboardEvent())).toBe(expected)
+    expect(clipboardReadImageMock).not.toHaveBeenCalled()
+    expect(() => probe?.(makeClipboardEvent({ id: 42 }))).toThrow()
   })
 })

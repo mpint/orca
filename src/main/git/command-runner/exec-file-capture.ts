@@ -2,6 +2,7 @@ import { execFile, type ChildProcess, type ExecFileOptions } from 'node:child_pr
 import { recordSubprocessSpawn } from '../../diagnostics/main-thread-churn-probe'
 import { endSubprocessStdin } from '../../../shared/subprocess-stdin-write'
 import { runProcess } from '../../../shared/child-process/run-process'
+import { resolveSelectedLocalCommand } from '../../ipc/command-path-resolver'
 import type { WslProcessGroupTermination } from '../wsl-process-group-termination'
 import { createAbortError } from './abort-error'
 import { killSpawnedCommandTree } from './spawned-command-tree-kill'
@@ -15,6 +16,8 @@ type ExecFileCaptureOptions = Omit<ExecFileOptions, 'timeout'> & {
   onChildTerminated?: () => void
   admissionTier?: GitAdmissionTier
   createTimeoutError?: () => Error
+  /** Called once when the deadline — not an abort — is what ended the process. */
+  onDeadlineKill?: () => void
 }
 
 const GIT_TERMINATION_BARRIER_FALLBACK_TIMEOUT_MS = 2_147_000_000
@@ -25,8 +28,13 @@ export async function execFileCaptureToTermination(
   options: ExecFileCaptureOptions,
   termination?: WslProcessGroupTermination
 ): Promise<{ stdout: string | Buffer; stderr: string | Buffer }> {
-  const result = await runProcess({
-    program: command,
+  // Spawn cost is reported by spawnProcess's observer, which runProcess goes
+  // through; recording it again here would double-count every capture.
+  const pending = runProcess({
+    program: resolveSelectedLocalCommand(command, {
+      env: options.env,
+      cwd: typeof options.cwd === 'string' ? options.cwd : undefined
+    }),
     args,
     cwd: typeof options.cwd === 'string' ? options.cwd : undefined,
     env: options.env,
@@ -37,18 +45,32 @@ export async function execFileCaptureToTermination(
     onChildTerminated: options.onChildTerminated,
     ...(options.stdin === undefined ? {} : { input: options.stdin })
   })
+  const result = await pending
   const stdout = options.encoding === 'buffer' ? Buffer.from(result.stdout) : result.stdout
   const cleanStderr = termination?.stripControlOutput(result.stderr) ?? result.stderr
   const stderr = options.encoding === 'buffer' ? Buffer.from(cleanStderr) : cleanStderr
-  if (result.code === 0 && !result.timedOut && !options.signal?.aborted) {
+  if (
+    result.code === 0 &&
+    !result.timedOut &&
+    !result.outputTruncated &&
+    !options.signal?.aborted
+  ) {
     return { stdout, stderr }
+  }
+  if (result.timedOut && !options.signal?.aborted) {
+    options.onDeadlineKill?.()
   }
   const error = result.timedOut
     ? (options.createTimeoutError?.() ?? new Error(`${command} timed out.`))
     : new Error(
         options.signal?.aborted
           ? 'The operation was aborted.'
-          : cleanStderr.trim() || `${command} exited with ${result.code}.`
+          : result.outputTruncated
+            ? // Why fail instead of returning the clipped text: callers parse this
+              // as JSON or JSONL, where a clipped answer reads as a shorter valid
+              // one. execFile's own maxBuffer overrun errored for the same reason.
+              `${command} produced more than ${options.maxBuffer ?? DEFAULT_GIT_MAX_BUFFER} bytes of output.`
+            : cleanStderr.trim() || `${command} exited with ${result.code}.`
       )
   if (options.signal?.aborted) {
     error.name = 'AbortError'

@@ -16,7 +16,7 @@ const openModal = vi.fn()
 const openTaskPage = vi.fn()
 const updateWorktreeMeta = vi.fn()
 const recordFeatureInteraction = vi.fn()
-const setWorkspacePortScan = vi.fn()
+const replaceWorkspacePortScans = vi.fn()
 const setWorkspacePortScanRefreshing = vi.fn()
 const cacheTimerMocks = vi.hoisted(() => ({
   usePromptCacheCountdownStartedAt: vi.fn()
@@ -52,7 +52,7 @@ vi.mock('@/store', () => ({
       recordFeatureInteraction,
       remoteBranchConflictByWorktreeId: {},
       setRemoteBrowserPageHandle: vi.fn(),
-      setWorkspacePortScan,
+      replaceWorkspacePortScans,
       setWorkspacePortScanRefreshing,
       settings,
       sshConnectionStates: new Map(),
@@ -99,6 +99,10 @@ vi.mock('./use-worktree-activity-status', () => ({
   useWorktreeActivityStatus: () => 'active'
 }))
 
+vi.mock('./use-worktree-sleep-state', () => ({
+  useIsSleepingWorktree: () => false
+}))
+
 vi.mock('./CacheTimer', () => ({
   default: () => null,
   usePromptCacheCountdownStartedAt: cacheTimerMocks.usePromptCacheCountdownStartedAt
@@ -116,7 +120,6 @@ vi.mock('./WorktreeCardAgents', () => ({
 
 vi.mock('./WorktreeContextMenu', () => ({
   default: ({ children }: { children: ReactNode }) => <>{children}</>,
-  CLOSE_ALL_CONTEXT_MENUS_EVENT: 'orca:test-close-context-menus',
   WORKTREE_CONTEXT_MENU_SCOPE_ATTR: 'data-orca-context-menu-scope',
   WORKTREE_NATIVE_CONTEXT_MENU_ATTR: 'data-worktree-native-context-menu'
 }))

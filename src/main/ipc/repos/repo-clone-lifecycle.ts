@@ -8,7 +8,7 @@ import type { Repo } from '../../../shared/repo-types'
 import { isFolderRepo } from '../../../shared/repo-kind'
 import { DEFAULT_REPO_BADGE_COLOR } from '../../../shared/constants'
 import { getGitCloneFailureMessage } from '../../../shared/git-clone-failure-message'
-import { gitSpawnAfterWindowsEnvironmentReady, nonInteractiveGitEnv } from '../../git/runner'
+import { gitSpawnAfterWindowsEnvironmentReady, promptGuardGitEnv } from '../../git/runner'
 import { getRepoName } from '../../git/repo'
 import type { ClaimedCloneTarget } from '../../git/repo-clone-path'
 import {
@@ -17,6 +17,7 @@ import {
   deriveValidatedClonePath,
   getClonePathComparisonKey
 } from '../../git/repo-clone-path'
+import { LOCAL_EXECUTION_HOST_ID } from '../../../shared/execution-host'
 import { detectRepoIconAndUpstream } from '../../repo-icon-autodetect'
 import { prepareLocalWorktreeRootForRepo } from '../../worktree-root-preparation'
 import { invalidateAuthorizedRootsCache } from '../registered-worktree-roots-cache'
@@ -147,7 +148,7 @@ export function registerRepoCloneHandlers(mainWindow: BrowserWindow, store: Stor
               cwd: args.destination,
               admissionTier: 'interactive',
               // Why: without this, an auth-needing clone pops Git Credential Manager's OAuth window on Windows, unclosable in a restricted env (issue #7652).
-              env: nonInteractiveGitEnv(),
+              env: promptGuardGitEnv(),
               signal: pendingController.signal,
               stdio: ['ignore', 'ignore', 'pipe']
             }
@@ -257,7 +258,11 @@ export function registerRepoCloneHandlers(mainWindow: BrowserWindow, store: Stor
             return existing
           }
 
-          const detected = await detectRepoIconAndUpstream({ repoPath: clonePath, kind: 'git' })
+          const detected = await detectRepoIconAndUpstream({
+            repoPath: clonePath,
+            kind: 'git',
+            executionHostId: LOCAL_EXECUTION_HOST_ID
+          })
           const repo: Repo = {
             id: randomUUID(),
             path: clonePath,

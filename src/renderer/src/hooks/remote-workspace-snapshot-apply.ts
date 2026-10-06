@@ -79,6 +79,12 @@ type RemoteWorkspaceSnapshotApplyInput = {
   isPreparationTokenCurrent: (token: DirectSshPreparationToken) => boolean
   waitForWorkspaceSessionReady: (signal?: AbortSignal) => Promise<boolean>
   finalizeHydratedTerminals: (authority: DirectSshAuthority) => number
+  /**
+   * Host paths still carrying terminal tabs when this apply gave up placing them. `unverifiable`,
+   * never proof the rows are not ours, so the caller owns getting back to a placed picture — this
+   * apply itself has no way back once the bounded in-apply wait expires.
+   */
+  onUnplacedTabWorktreePaths?: (worktreePaths: readonly string[]) => void
 }
 
 export type RemoteWorkspaceSnapshotApplyResult = 'applied' | 'stale' | 'failed'
@@ -115,7 +121,8 @@ export async function applyDirectSshRemoteWorkspaceSnapshot({
   isArrivalCurrent,
   isPreparationTokenCurrent,
   waitForWorkspaceSessionReady,
-  finalizeHydratedTerminals
+  finalizeHydratedTerminals,
+  onUnplacedTabWorktreePaths
 }: RemoteWorkspaceSnapshotApplyInput): Promise<RemoteWorkspaceSnapshotApplyResult> {
   const { authority } = token
   if (!isArrivalCurrent(authority.targetId, arrival)) {
@@ -175,12 +182,23 @@ export async function applyDirectSshRemoteWorkspaceSnapshot({
     state.tabsByWorktree,
     currentRecoveryTabIds(state, authority, worktreeIds),
     toSshExecutionHostId(authority.targetId),
-    snapshot.revision
+    state.closedTerminalTabTombstonesByTabId,
+    new Set(
+      [...worktreeIds].flatMap((id) =>
+        (state.tabsByWorktree[id] ?? [])
+          .filter(
+            (tab) =>
+              state.pendingDirectSshLayoutEditsByTabId[tab.id]?.targetId === authority.targetId
+          )
+          .map((tab) => tab.id)
+      )
+    )
   )
   if (!isArrivalCurrent(authority.targetId, arrival) || !isPreparationTokenCurrent(token)) {
     return 'stale'
   }
   const hasUnplacedTerminalTabs = unplacedTabWorktreePaths.length > 0
+  onUnplacedTabWorktreePaths?.([...unplacedTabWorktreePaths])
   snapshotApplyDepth += 1
   try {
     const currentStore = store.getState()
@@ -211,7 +229,8 @@ export async function applyDirectSshRemoteWorkspaceSnapshot({
       //     replaces the host snapshot - it would delete the very tabs we failed to adopt;
       //   - workspace-terminal-host-authority.ts treats `offline`/`error` on an un-hydrated target
       //     as `none`, its bounded floor, which authorises seeding AND sleeping-agent resume.
-      //     `conflict` is deliberately not in that set, so authority stays `unverifiable`.
+      //     `conflict` is deliberately not in that set: the unplaced paths stay `unverifiable`,
+      //     and only the worktrees this apply did place read `none`.
       // Hydration is cleared, not merely withheld: the set is add-only, so a target that synced
       // cleanly before would otherwise keep uploading from this incomplete picture (STA-3593).
       currentStore.clearRemoteWorkspaceHydrated(authority.targetId)
@@ -220,7 +239,8 @@ export async function applyDirectSshRemoteWorkspaceSnapshot({
         direction: 'pull',
         revision: snapshot.revision,
         updatedAt: snapshot.updatedAt,
-        hostObservationToken: snapshot.hostObservationToken
+        hostObservationToken: snapshot.hostObservationToken,
+        unplacedTabWorktreePaths: [...unplacedTabWorktreePaths]
       })
     }
     const reconnectAbort = new AbortController()

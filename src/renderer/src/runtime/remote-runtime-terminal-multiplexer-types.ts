@@ -41,6 +41,10 @@ export type RemoteRuntimeMultiplexedTerminalCallbacks = {
       kittyKeyboardFlags?: number
       alternateScreen?: boolean
       terminalOwner?: 'shell'
+      /** Grid the host serialized this image at. Absent from hosts that omit
+       *  it, which must read as unknown so replay keeps the pane's own grid. */
+      cols?: number
+      rows?: number
     }
   ) => void
   onSubscribed?: () => void
@@ -72,6 +76,8 @@ export type RemoteRuntimeSnapshotImage = {
   kittyKeyboardFlags?: number
   alternateScreen?: boolean
   terminalOwner?: 'shell'
+  /** `data` starts on the normal buffer and enters alt itself. */
+  carriesNormalBuffer?: boolean
 }
 
 /** Transient causes the host itself reported: a request reached it and it declined to serialize now. */
@@ -129,13 +135,9 @@ export type RemoteRuntimeMultiplexedTerminal = {
   resize: (cols: number, rows: number) => boolean
   claimViewport: (cols: number, rows: number) => boolean
   setOutputPaused: (paused: boolean) => boolean
-  serializeBuffer: (opts?: { scrollbackRows?: number }) => Promise<{
-    data: string
-    cols: number
-    rows: number
-    seq?: number
-    source?: 'headless' | 'renderer'
-  } | null>
+  serializeBuffer: (opts?: {
+    scrollbackRows?: number
+  }) => Promise<RemoteRuntimeSnapshotImage | null>
   // Why: same request as serializeBuffer, but keeps the host's reason for an absent buffer instead of collapsing it to null.
   serializeBufferOutcome: (opts?: {
     scrollbackRows?: number

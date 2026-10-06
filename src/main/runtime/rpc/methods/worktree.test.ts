@@ -1,3 +1,4 @@
+import '../unused-default-rpc-methods.test-fixture'
 import { describe, expect, it, vi } from 'vitest'
 import { RpcDispatcher } from '../dispatcher'
 import type { RpcRequest } from '../core'
@@ -131,7 +132,7 @@ describe('worktree RPC methods', () => {
       pushTarget: { remoteName: 'fork', branchName: 'feature' },
       runHooks: false,
       activate: false,
-      navigation: 'all',
+      navigation: 'host',
       setupDecision: 'skip',
       createdWithAgent: undefined,
       automationProvenance: undefined,
@@ -145,6 +146,33 @@ describe('worktree RPC methods', () => {
         orchestrationContext: undefined
       }
     })
+  })
+
+  it('keeps the legacy CLI name-only create shape explicit at the host boundary', async () => {
+    const runtime = {
+      getRuntimeId: () => 'test-runtime',
+      dedupeWorktreeCreate: passthroughDedupe,
+      showRepo: vi.fn().mockResolvedValue(repo),
+      createManagedWorktree: vi.fn().mockResolvedValue({ worktree: { id: 'wt-cli' } })
+    } as unknown as OrcaRuntimeService
+    const dispatcher = new RpcDispatcher({ runtime, methods: WORKTREE_METHODS })
+
+    await dispatcher.dispatch(
+      makeRequest('worktree.create', {
+        repo: 'repo-1',
+        name: 'feature',
+        cliProvenanceRequest: {}
+      })
+    )
+
+    expect(runtime.createManagedWorktree).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'feature',
+        displayName: undefined,
+        displayNameKind: undefined,
+        cliProvenance: expect.objectContaining({ kind: 'created-by-cli' })
+      })
+    )
   })
 
   it('mints automation provenance from a valid dispatch request on worktree creation', async () => {

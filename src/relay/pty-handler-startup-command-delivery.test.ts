@@ -1,3 +1,4 @@
+import './mock-descendant-sweep'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -88,8 +89,7 @@ describe('PtyHandler', () => {
     expect(term.write).not.toHaveBeenCalled()
 
     vi.advanceTimersByTime(1)
-    const submit = process.platform === 'win32' ? '\r' : '\n'
-    expect(term.write).toHaveBeenCalledWith(`echo provider-owned${submit}`)
+    expect(term.write).toHaveBeenCalledWith('echo provider-owned\r')
     expect(handler.retainedStartupCommandCount).toBe(0)
   })
 
@@ -130,6 +130,77 @@ describe('PtyHandler', () => {
       expect(handler.retainedStartupCommandBytes).toBe(0)
       vi.advanceTimersByTime(15_000)
       expect(handler.retainedStartupCommandCount).toBe(0)
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'emits shell-ready markers for plain Codex on a line-editor shell',
+    async () => {
+      const oldShell = process.env.SHELL
+      const oldHome = process.env.HOME
+      const homeDir = mkdtempSync(join(tmpdir(), 'relay-plain-codex-spawn-'))
+
+      process.env.SHELL = '/bin/bash'
+      process.env.HOME = homeDir
+      try {
+        // No prefill flag and no shell-ready hint: the host decides from its own
+        // shell, because the client cannot see it (#18767).
+        const reply = await dispatcher.callRequest('pty.spawn', {
+          env: { HOME: homeDir },
+          command: 'codex'
+        })
+        expect(reply).toMatchObject({ shellReadyArmed: true })
+      } finally {
+        if (oldShell === undefined) {
+          delete process.env.SHELL
+        } else {
+          process.env.SHELL = oldShell
+        }
+        if (oldHome === undefined) {
+          delete process.env.HOME
+        } else {
+          process.env.HOME = oldHome
+        }
+        rmSync(homeDir, { recursive: true, force: true })
+      }
+
+      const spawnOptions = mockPtySpawn.mock.calls[0]?.[2] as
+        | { env?: Record<string, string> }
+        | undefined
+      expect(spawnOptions?.env?.ORCA_SHELL_FEATURES).toContain('ready')
+      vi.advanceTimersByTime(15_000)
+      expect(handler.retainedStartupCommandCount).toBe(0)
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'leaves plain Codex unwaited on a shell that emits the marker before its reader',
+    async () => {
+      const oldHome = process.env.HOME
+      const homeDir = mkdtempSync(join(tmpdir(), 'relay-plain-codex-fish-spawn-'))
+
+      process.env.HOME = homeDir
+      try {
+        const reply = await dispatcher.callRequest('pty.spawn', {
+          env: { HOME: homeDir, SHELL: '/usr/bin/fish' },
+          command: 'codex'
+        })
+        // Why the reply carries it: the client cannot see this shell, and without
+        // the verdict it waits the full fallback for a marker fish never emits.
+        expect(reply).toMatchObject({ shellReadyArmed: false })
+      } finally {
+        if (oldHome === undefined) {
+          delete process.env.HOME
+        } else {
+          process.env.HOME = oldHome
+        }
+        rmSync(homeDir, { recursive: true, force: true })
+      }
+
+      const spawnOptions = mockPtySpawn.mock.calls[0]?.[2] as
+        | { env?: Record<string, string> }
+        | undefined
+      expect(spawnOptions?.env?.ORCA_SHELL_FEATURES ?? '').not.toContain('ready')
     }
   )
 
@@ -292,7 +363,7 @@ describe('PtyHandler', () => {
       expect(term.write).not.toHaveBeenCalled()
       vi.advanceTimersByTime(1)
 
-      expect(term.write).toHaveBeenCalledWith('echo after-ready\n')
+      expect(term.write).toHaveBeenCalledWith('echo after-ready\r')
       expect(handler.retainedStartupCommandCount).toBe(0)
       vi.advanceTimersByTime(8)
       expect(dispatcher.notify).toHaveBeenCalledWith('pty.data', {
@@ -349,7 +420,7 @@ describe('PtyHandler', () => {
       promptOptions.onPromptReady()
       await vi.advanceTimersByTimeAsync(50)
 
-      expect(term.write).toHaveBeenCalledWith('echo after-exec\n')
+      expect(term.write).toHaveBeenCalledWith('echo after-exec\r')
       expect(handler.retainedStartupCommandCount).toBe(0)
     }
   )
@@ -563,7 +634,7 @@ describe('PtyHandler', () => {
       dataCallback?.('\x1b]777;orca-shell-ready')
       vi.advanceTimersByTime(1500)
 
-      expect(term.write).toHaveBeenCalledWith('echo fallback\n')
+      expect(term.write).toHaveBeenCalledWith('echo fallback\r')
       vi.advanceTimersByTime(8)
       expect(dispatcher.notify).toHaveBeenCalledWith('pty.data', {
         id: PTY_1,

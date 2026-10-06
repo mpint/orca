@@ -31,7 +31,10 @@ export function useCombinedDiffSectionLoader({
   sectionCount: number
   setSectionHeights: React.Dispatch<React.SetStateAction<Record<number, number>>>
   setSections: React.Dispatch<React.SetStateAction<DiffSection[]>>
-}): (index: number) => void {
+}): {
+  loadSection: (index: number) => void
+  loadDeferredSection: (index: number) => void
+} {
   const {
     allEntries,
     branchCompare,
@@ -45,6 +48,7 @@ export function useCombinedDiffSectionLoader({
     uncommittedEntries
   } = entrySet
   const {
+    deferredLoadRequestsRef,
     generationRef,
     loadSchedulerRef,
     loadSectionRef,
@@ -57,6 +61,10 @@ export function useCombinedDiffSectionLoader({
 
   const loadSectionNow = useCallback(
     async (index: number) => {
+      if (sectionsRef.current[index]?.loadOnDemand && !deferredLoadRequestsRef.current.has(index)) {
+        return
+      }
+      deferredLoadRequestsRef.current.delete(index)
       if (loadedIndicesRef.current.has(index) || loadingIndicesRef.current.has(index)) {
         return
       }
@@ -100,15 +108,6 @@ export function useCombinedDiffSectionLoader({
         } as GitDiffResult
       }
 
-      const largeDiffRenderLimit =
-        !error && result.kind === 'text'
-          ? (result.largeDiffRenderLimit ??
-            getLargeDiffRenderLimit({
-              originalContent: result.originalContent,
-              modifiedContent: result.modifiedContent
-            }))
-          : null
-
       if (generationRef.current !== gen) {
         // Why: the generation reset already cleared the in-flight set, and a newer load for this
         // index may own the entry now — deleting it here would hide that load from the guard above.
@@ -121,6 +120,14 @@ export function useCombinedDiffSectionLoader({
         requestSectionReloadRef.current(index)
         return
       }
+      const largeDiffRenderLimit =
+        !error && result.kind === 'text'
+          ? (result.largeDiffRenderLimit ??
+            getLargeDiffRenderLimit({
+              originalContent: result.originalContent,
+              modifiedContent: result.modifiedContent
+            }))
+          : null
       const storedContent = getStoredTextDiffContent(result, largeDiffRenderLimit)
       const storedResult = getStoredTextDiffResult(result, largeDiffRenderLimit)
       loadedIndicesRef.current.add(index)
@@ -187,12 +194,29 @@ export function useCombinedDiffSectionLoader({
   // Progressive loading: queue diff content when a section becomes visible.
   const loadSection = useCallback(
     (index: number) => {
-      if (sectionsRef.current[index]?.collapsed) {
+      if (sectionsRef.current[index]?.collapsed || sectionsRef.current[index]?.loadOnDemand) {
         return
       }
       loadSchedulerRef.current.request(index)
     },
     [loadSchedulerRef, sectionsRef]
+  )
+
+  const loadDeferredSection = useCallback(
+    (index: number): void => {
+      const section = sectionsRef.current[index]
+      if (!section?.loadOnDemand) {
+        return
+      }
+      deferredLoadRequestsRef.current.add(index)
+      setSections((prev) =>
+        prev.map((item, itemIndex) =>
+          itemIndex === index ? { ...item, loadOnDemand: false, loading: true } : item
+        )
+      )
+      loadSchedulerRef.current.request(index)
+    },
+    [deferredLoadRequestsRef, loadSchedulerRef, sectionsRef, setSections]
   )
 
   useEffect(() => {
@@ -216,5 +240,5 @@ export function useCombinedDiffSectionLoader({
     }
   }, [entrySignature, loadSection, loadedIndicesRef, sectionCount, sectionsRef])
 
-  return loadSection
+  return { loadSection, loadDeferredSection }
 }

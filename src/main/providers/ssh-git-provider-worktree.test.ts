@@ -140,20 +140,53 @@ describe('SshGitProvider', () => {
     expect(result).toEqual({ clean: false })
   })
 
-  it('refreshLocalBaseRefForWorktreeCreate sends the narrow refresh request', async () => {
-    await provider.refreshLocalBaseRefForWorktreeCreate({
+  it('refreshLocalBaseRefForWorktreeCreate sends the narrow refresh request and returns its outcome', async () => {
+    const refs = {
       repoPath: '/home/user/repo',
       fullRef: 'refs/heads/main',
-      remoteTrackingRef: 'refs/remotes/origin/main',
+      remoteTrackingRef: 'refs/remotes/origin/main'
+    }
+    mux.request.mockResolvedValueOnce({
+      status: 'skipped_dirty_worktree',
       ownerWorktreePath: '/home/user/repo'
     })
 
-    expect(mux.request).toHaveBeenCalledWith('git.refreshLocalBaseRefForWorktreeCreate', {
-      repoPath: '/home/user/repo',
-      fullRef: 'refs/heads/main',
-      remoteTrackingRef: 'refs/remotes/origin/main',
+    await expect(provider.refreshLocalBaseRefForWorktreeCreate(refs)).resolves.toEqual({
+      status: 'skipped_dirty_worktree',
       ownerWorktreePath: '/home/user/repo'
     })
+    expect(mux.request).toHaveBeenCalledWith('git.refreshLocalBaseRefForWorktreeCreate', refs)
+  })
+
+  it('refreshLocalBaseRefForWorktreeCreate reads a malformed relay reply as an error', async () => {
+    mux.request.mockResolvedValueOnce(undefined)
+
+    await expect(
+      provider.refreshLocalBaseRefForWorktreeCreate({
+        repoPath: '/home/user/repo',
+        fullRef: 'refs/heads/main',
+        remoteTrackingRef: 'refs/remotes/origin/main'
+      })
+    ).resolves.toEqual({ status: 'skipped_error' })
+  })
+
+  it('getLocalBaseRefFastForwardableBehind asks the relay to inspect without moving anything', async () => {
+    const refs = {
+      repoPath: '/home/user/repo',
+      fullRef: 'refs/heads/main',
+      remoteTrackingRef: 'refs/remotes/origin/main'
+    }
+    mux.request
+      .mockResolvedValueOnce({ status: 'behind', behind: 4, localOid: 'a', remoteOid: 'b' })
+      .mockResolvedValueOnce({ status: 'skipped_dirty_worktree', ownerWorktreePath: '/x' })
+
+    await expect(provider.getLocalBaseRefFastForwardableBehind(refs)).resolves.toBe(4)
+    await expect(provider.getLocalBaseRefFastForwardableBehind(refs)).resolves.toBeUndefined()
+    expect(mux.request).toHaveBeenCalledWith('git.inspectLocalBaseRefForWorktreeCreate', refs)
+    expect(mux.request).not.toHaveBeenCalledWith(
+      'git.refreshLocalBaseRefForWorktreeCreate',
+      expect.anything()
+    )
   })
 
   it('worktreeIsClean falls back to git.status for old relays', async () => {
@@ -393,6 +426,40 @@ describe('SshGitProvider', () => {
 
     await expect(
       provider.forceDeletePreservedBranch('/home/user/repo', 'you/fix-auth', 'abc123')
+    ).rejects.toBe(error)
+  })
+
+  it('markRemoteOrcaCreated sends the narrow provenance-marker request', async () => {
+    await provider.markRemoteOrcaCreated('/home/user/repo', 'pr-contributor-orca')
+    expect(mux.request).toHaveBeenCalledWith('git.markRemoteOrcaCreated', {
+      repoPath: '/home/user/repo',
+      remoteName: 'pr-contributor-orca'
+    })
+  })
+
+  it('markRemoteOrcaCreated degrades to a one-time warning for an older relay', async () => {
+    mux.request.mockRejectedValue(methodNotFound('git.markRemoteOrcaCreated'))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await expect(
+        provider.markRemoteOrcaCreated('/home/user/repo', 'pr-contributor-orca')
+      ).resolves.toBeUndefined()
+      await expect(
+        provider.markRemoteOrcaCreated('/home/user/repo', 'pr-contributor-orca')
+      ).resolves.toBeUndefined()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('markRemoteOrcaCreated rethrows non-method-not-found errors', async () => {
+    const error = new Error('remote config write failed')
+    mux.request.mockRejectedValueOnce(error)
+
+    await expect(
+      provider.markRemoteOrcaCreated('/home/user/repo', 'pr-contributor-orca')
     ).rejects.toBe(error)
   })
 })

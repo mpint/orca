@@ -1,27 +1,26 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
-  ActivityIndicator,
   FlatList,
   Image,
-  Platform,
-  Pressable,
-  ScrollView,
-  Text,
   View,
+  Text,
+  ScrollView,
+  Pressable,
+  Platform,
+  ActivityIndicator,
   type ListRenderItem
 } from 'react-native'
 import { Copy, MessageSquare, Send } from 'lucide-react-native'
-import { MobileHtmlPreview } from '../components/MobileHtmlPreview'
 import { MobileSyntaxSegments } from '../components/MobileSyntaxSegments'
-import { colors } from '../theme/mobile-theme'
 import {
   buildPlainMobileDiffSyntaxLines,
   highlightMobileCode,
   highlightMobileDiffLines,
   resolveMobileSyntaxLanguage
 } from './mobile-file-syntax'
+import { MobileHtmlPreview } from '../components/MobileHtmlPreview'
+import { colors } from '../theme/mobile-theme'
 import { styles } from './mobile-session-styles'
-import { MobileDiffCommentLineRow } from './MobileDiffCommentLineRow'
 import type { DiffComment } from '../../../src/shared/diff-comment-types'
 import type {
   DiffCommentActions,
@@ -30,8 +29,10 @@ import type {
   FileSyntaxState,
   RenderableDiffLine
 } from './mobile-session-route-types'
+import { DiffLineRow } from './MobileSessionDiffLineRow'
+import { sendableMobileDiffComments } from './mobile-diff-comments'
 
-export function MobileSessionFileReader({
+export function FileReader({
   doc,
   title,
   relativePath,
@@ -106,7 +107,7 @@ export function MobileSessionFileReader({
 
   const renderDiffLine: ListRenderItem<RenderableDiffLine> = useCallback(
     ({ item, index }) => (
-      <MobileDiffCommentLineRow
+      <DiffLineRow
         line={item}
         title={title}
         index={index}
@@ -187,8 +188,12 @@ export function MobileSessionFileReader({
     const activeDiffSyntax =
       diffSyntax?.doc === doc && diffSyntax.language === syntaxLanguage ? diffSyntax.lines : null
     const commentCount = diffCommentActions?.comments.length ?? 0
-    const unsentCommentCount =
-      diffCommentActions?.comments.filter((comment) => !comment.sentAt).length ?? 0
+    const unsentCommentCount = diffCommentActions
+      ? sendableMobileDiffComments(
+          diffCommentActions.comments,
+          diffCommentActions.sendingCommentIds
+        ).length
+      : 0
     const commentsBusy = diffCommentActions?.busy === true
     const canCopyNotes = commentCount > 0 && !commentsBusy
     const canSendNotes = unsentCommentCount > 0 && !commentsBusy

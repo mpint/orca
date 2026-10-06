@@ -20,6 +20,7 @@ import { isGrokEvent } from './provider-event-names'
 import { extractGrokToolFields } from './providers/grok-tool-fields'
 import { extractHermesToolFields } from './providers/hermes-tool-fields'
 import { extractAuggieToolFields } from './providers/aug-tool-fields'
+import { extractJcodeToolFields } from './providers/jcode-tool-fields'
 
 export function isGrokIdleNotification(message: string | undefined): boolean {
   if (!message) {
@@ -39,13 +40,28 @@ export function isGrokIdleNotification(message: string | undefined): boolean {
 export function isNewTurnEvent(source: AgentHookSource, eventName: unknown): boolean {
   // Why: exhaustive switch so a new AgentHookSource fails typecheck here instead of falling through to false.
   switch (source) {
+    case 'qoder-cn':
+    case 'qwen-code':
+    case 'qoder':
     case 'claude':
       // Why: SessionStart lands an idle row (STA-3386) and must also drop stale
       // tool/prompt caches left by the pane's previous session.
       return eventName === 'SessionStart' || eventName === 'UserPromptSubmit'
+    case 'codebuddy':
     case 'kimi':
       // Why: Kimi Code emits Claude-compatible hook events, so UserPromptSubmit is its new-turn boundary too.
       return eventName === 'UserPromptSubmit'
+    case 'muse':
+      // Muse uses Claude-compatible lifecycle events.
+      return eventName === 'UserPromptSubmit'
+    case 'dsh':
+      // Why: DSH's Claude-Code hook bridge fires SessionStart once per session before the
+      // first turn, which is the point stale tool/prompt caches from a reused pane must go.
+      return eventName === 'SessionStart' || eventName === 'UserPromptSubmit'
+    case 'zcode':
+      // Why: matches Codex/Claude — SessionStart lands an idle boundary row and drops stale
+      // tool/prompt caches, while UserPromptSubmit is the actual turn boundary.
+      return eventName === 'SessionStart' || eventName === 'UserPromptSubmit'
     case 'codex':
       return eventName === 'SessionStart' || eventName === 'UserPromptSubmit'
     case 'gemini':
@@ -55,6 +71,7 @@ export function isNewTurnEvent(source: AgentHookSource, eventName: unknown): boo
     case 'amp':
       return eventName === 'agent.start'
     case 'opencode':
+    case 'opencode2':
       return eventName === 'SessionStart'
     case 'mimo-code':
       return false
@@ -79,6 +96,11 @@ export function isNewTurnEvent(source: AgentHookSource, eventName: unknown): boo
     case 'devin':
       // Why: SessionStart is handled by an early return in normalizeDevinEvent, so UserPromptSubmit is Devin's real new-turn boundary here.
       return eventName === 'UserPromptSubmit'
+    case 'jcode':
+      // Why: jcode has no UserPromptSubmit, but turn_start fires once per submitted
+      // prompt before the model generates — its real turn boundary. session_start
+      // returns early in normalizeJcodeEvent and clears the cache itself.
+      return eventName === 'turn_start'
     case 'aug':
       // Why: PromptSubmit (added in a newer Auggie build than this integration's original)
       // fires on every user turn, unlike SessionStart which fires once per process — it is
@@ -111,8 +133,23 @@ export function hasExplicitUserPrompt(
   ) {
     return true
   }
+  if (
+    source === 'jcode' &&
+    (eventName === 'turn_start' ||
+      eventName === 'pre_tool' ||
+      eventName === 'post_tool' ||
+      eventName === 'turn_end') &&
+    hasTranscriptPromptEvidence &&
+    resolvedPromptText.trim().length > 0
+  ) {
+    // Why: jcode hooks carry no prompt field; only the journal-backed prompt counts as explicit user text.
+    return true
+  }
   if (extractedPrompt.source === 'role_user_text') {
-    return (source === 'opencode' || source === 'mimo-code') && eventName === 'MessagePart'
+    return (
+      (source === 'opencode' || source === 'opencode2' || source === 'mimo-code') &&
+      eventName === 'MessagePart'
+    )
   }
   if (extractedPrompt.text.length === 0) {
     return false
@@ -143,10 +180,23 @@ export function extractToolFields(
 ): ToolSnapshot {
   // Why: exhaustive switch so a new AgentHookSource fails typecheck here instead of silently routing through OpenCode's extractor.
   switch (source) {
+    case 'qoder-cn':
+    case 'qwen-code':
+    case 'qoder':
     case 'claude':
     // Why: Kimi Code uses Claude's tool_name/tool_input payload fields verbatim.
     // falls through
+    case 'codebuddy':
     case 'kimi':
+    // Muse uses Claude-compatible tool fields.
+    // falls through
+    case 'muse':
+    // DSH's own Claude-Code hook bridge emits Claude's tool_name/tool_input verbatim.
+    // falls through
+    case 'dsh':
+    // Why: ZCode's hook runner writes Claude's `tool_name`/`tool_input`/`tool_response` aliases.
+    // falls through
+    case 'zcode':
       return extractClaudeToolFields(eventName, hookPayload)
     case 'codex':
       return extractCodexToolFields(eventName, hookPayload)
@@ -157,6 +207,7 @@ export function extractToolFields(
     case 'amp':
       return extractAmpToolFields(eventName, hookPayload)
     case 'opencode':
+    case 'opencode2':
     case 'mimo-code':
       return extractOpenCodeToolFields(eventName, hookPayload)
     case 'cursor':
@@ -177,6 +228,8 @@ export function extractToolFields(
       return extractHermesToolFields(eventName, hookPayload)
     case 'devin':
       return extractClaudeToolFields(eventName, hookPayload)
+    case 'jcode':
+      return extractJcodeToolFields(eventName, hookPayload)
     case 'aug':
       return extractAuggieToolFields(eventName, hookPayload)
   }

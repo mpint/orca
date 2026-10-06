@@ -1,8 +1,12 @@
+import { throwIfSignalAborted } from '../shared/abort-signal-reason'
+import { annotateWorktreeLocksFromAdmin } from '../shared/git-worktree-admin'
 import * as path from 'node:path'
 import type { RequestContext } from './dispatcher'
 import { expandTilde } from './context'
 import { GitHandlerOperationContext } from './git-handler-operation-context'
-import { isUnsupportedWorktreeListZError, parseWorktreeList } from './git-handler-utils'
+import { isUnsupportedWorktreeListZError } from './git-handler-utils'
+import { parseWorktreeList } from '../shared/git-worktree-porcelain-parser'
+import type { GitWorktreeInfo } from '../shared/worktree/types'
 import {
   addWorktreeOp,
   areRelayWorktreePathsEqual,
@@ -10,7 +14,10 @@ import {
   worktreeIsCleanOp
 } from './git-handler-worktree-ops'
 import { annotatePrunableWorktreesByExistence } from './git-handler-worktree-list'
-import { refreshLocalBaseRefForWorktreeCreateOp } from './git-handler-local-base-ref-refresh'
+import {
+  inspectLocalBaseRefForWorktreeCreateOp,
+  refreshLocalBaseRefForWorktreeCreateOp
+} from './git-handler-local-base-ref-refresh'
 import {
   hasUnsupportedRevParsePathFormatEcho,
   isUnsupportedRevParsePathFormatError
@@ -30,22 +37,23 @@ function resolveRelayPath(repoPath: string, value: string): string {
     : path.posix.resolve(repoPath, value)
 }
 
-type RelayRepoLocation = { topLevel: string; commonDir: string }
+type RelayRepoLocation = { topLevel: string; commonDir: string; gitDir: string }
 
 function parseRelayRepoLocation(repoPath: string, output: string): RelayRepoLocation | undefined {
-  // Old git (pre `--path-format`) echoes the unknown flag and exits 0; drop `-`-prefixed lines, take the last two paths.
+  // Old git (pre `--path-format`) echoes the unknown flag and exits 0; drop `-`-prefixed lines, take the last three paths.
   // Strip only the trailing CR, not surrounding spaces — git paths may legitimately start or end with a space.
   const lines = output
     .split('\n')
     .map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line))
     .filter((line) => line.length > 0 && !line.startsWith('-'))
-  if (lines.length < 2) {
+  if (lines.length < 3) {
     return undefined
   }
-  const [topLevel, commonDir] = lines.slice(-2)
+  const [topLevel, commonDir, gitDir] = lines.slice(-3)
   return {
     topLevel: resolveRelayPath(repoPath, topLevel),
-    commonDir: resolveRelayPath(repoPath, commonDir)
+    commonDir: resolveRelayPath(repoPath, commonDir),
+    gitDir: resolveRelayPath(repoPath, gitDir)
   }
 }
 
@@ -60,14 +68,24 @@ export class GitHandlerWorktreeOperations extends GitHandlerOperationContext {
     }
   }
 
-  private async readRepoLocation(repoPath: string): Promise<RelayRepoLocation | undefined> {
+  private async readRepoLocation(
+    repoPath: string,
+    signal?: AbortSignal
+  ): Promise<RelayRepoLocation | undefined> {
     try {
       return await this.gitCapabilities.runWithFallback(
         'rev-parse-path-format',
         async () => {
           const { stdout } = await this.git(
-            ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'],
-            repoPath
+            [
+              'rev-parse',
+              '--path-format=absolute',
+              '--show-toplevel',
+              '--git-common-dir',
+              '--git-dir'
+            ],
+            repoPath,
+            { signal }
           )
           if (hasUnsupportedRevParsePathFormatEcho(stdout)) {
             // Why: old Git echoes the unknown option and exits zero; remember the signal though the paths still parse.
@@ -77,38 +95,47 @@ export class GitHandlerWorktreeOperations extends GitHandlerOperationContext {
         },
         async () => {
           const { stdout } = await this.git(
-            ['rev-parse', '--show-toplevel', '--git-common-dir'],
-            repoPath
+            ['rev-parse', '--show-toplevel', '--git-common-dir', '--git-dir'],
+            repoPath,
+            { signal }
           )
           return parseRelayRepoLocation(repoPath, stdout)
         },
         isUnsupportedRevParsePathFormatError
       )
     } catch {
+      throwIfSignalAborted(signal)
       return undefined
     }
   }
 
   private async normalizeMainWorktreePath(
     repoPath: string,
-    worktrees: Record<string, unknown>[]
-  ): Promise<Record<string, unknown>[]> {
+    worktrees: GitWorktreeInfo[],
+    signal?: AbortSignal
+  ): Promise<GitWorktreeInfo[]> {
+    throwIfSignalAborted(signal)
     const mainIndex = worktrees.findIndex((worktree) => worktree.isMainWorktree === true)
     const mainWorktree = worktrees[mainIndex]
-    const mainPath = typeof mainWorktree?.path === 'string' ? mainWorktree.path : ''
+    const mainPath = mainWorktree?.path ?? ''
     // Expand `~` so legacy tilde SSH repo paths match git's absolute path, sparing a rev-parse per poll.
     const resolvedRepoPath = expandTilde(repoPath)
     if (!mainPath || areRelayWorktreePathsEqual(mainPath, resolvedRepoPath)) {
       return worktrees
     }
 
-    const location = await this.readRepoLocation(resolvedRepoPath)
+    const location = await this.readRepoLocation(resolvedRepoPath, signal)
+    throwIfSignalAborted(signal)
     if (!location) {
       return worktrees
     }
 
     // Why: only separate-git-dir/submodule repos have main entry == git-common-dir; gate on it so we don't clobber a linked worktree's real root.
     if (!areRelayWorktreePathsEqual(mainPath, location.commonDir)) {
+      return worktrees
+    }
+    // Why: a linked worktree of a bare/separate-git-dir repo passes the gate above too; relabelling would repeat its path (#23631).
+    if (!areRelayWorktreePathsEqual(location.gitDir, location.commonDir)) {
       return worktrees
     }
 
@@ -127,24 +154,29 @@ export class GitHandlerWorktreeOperations extends GitHandlerOperationContext {
         })
         return this.normalizeMainWorktreePath(
           repoPath,
-          parseWorktreeList(stdout, { nulDelimited: true })
+          parseWorktreeList(stdout, { nulDelimited: true }),
+          context?.signal
         )
       },
       async () => {
         // Why: Git <2.36 lacks worktree-list `-z`, so fall back to the newline-block parser (loses newline-in-path safety).
-        try {
-          const { stdout } = await this.git(['worktree', 'list', '--porcelain'], repoPath, {
+        // Why no catch (#14004): swallowing to `[]` would report an unreadable catalog as an authoritative
+        // empty one, and callers use that to authorize missing-worktree teardown. Let the failure propagate.
+        const { stdout } = await this.git(['worktree', 'list', '--porcelain'], repoPath, {
+          signal: context?.signal
+        })
+        const normalized = await this.normalizeMainWorktreePath(
+          repoPath,
+          parseWorktreeList(stdout),
+          context?.signal
+        )
+        // Why: Git <2.31 emits no `prunable` annotation, so probe each linked worktree's existence instead of trusting stale registrations (issue #8389).
+        return annotatePrunableWorktreesByExistence(
+          await annotateWorktreeLocksFromAdmin(expandTilde(repoPath), normalized, {
             signal: context?.signal
-          })
-          const normalized = await this.normalizeMainWorktreePath(
-            repoPath,
-            parseWorktreeList(stdout)
-          )
-          // Why: Git <2.31 emits no `prunable` annotation, so probe each linked worktree's existence instead of trusting stale registrations (issue #8389).
-          return annotatePrunableWorktreesByExistence(normalized)
-        } catch {
-          return []
-        }
+          }),
+          context?.signal
+        )
       },
       isUnsupportedWorktreeListZError
     )
@@ -173,5 +205,9 @@ export class GitHandlerWorktreeOperations extends GitHandlerOperationContext {
     return this.runWithGitReadCacheClear(() =>
       refreshLocalBaseRefForWorktreeCreateOp(this.git.bind(this), params, this.gitCapabilities)
     )
+  }
+
+  async inspectLocalBaseRefForWorktreeCreate(params: Record<string, unknown>) {
+    return inspectLocalBaseRefForWorktreeCreateOp(this.git.bind(this), params, this.gitCapabilities)
   }
 }

@@ -10,6 +10,9 @@ function providerAnswering(answers: {
   remoteRefs: string[]
 }): ConflictProvider {
   const exec: ConflictProvider['exec'] = vi.fn(async (args: string[]) => {
+    if (args[0] === 'for-each-ref') {
+      return { stdout: '', stderr: '' }
+    }
     if (args[0] === 'remote') {
       return { stdout: `${answers.remotes.join('\n')}\n`, stderr: '' }
     }
@@ -19,8 +22,15 @@ function providerAnswering(answers: {
       }
       return { stdout: `${answers.localBranchHead}\n`, stderr: '' }
     }
-    if (args[0] === 'for-each-ref') {
-      return { stdout: `${answers.remoteRefs.join('\n')}\n`, stderr: '' }
+    if (args[0] === 'show-ref') {
+      const matches = answers.remoteRefs.filter((ref) => args.includes(ref))
+      if (matches.length > 0) {
+        return {
+          stdout: `${matches.map((ref) => `abc ${ref}`).join('\n')}\n`,
+          stderr: ''
+        }
+      }
+      throw Object.assign(new Error('missing remote ref'), { code: 1 })
     }
     throw new Error(`unexpected git ${args.join(' ')}`)
   })

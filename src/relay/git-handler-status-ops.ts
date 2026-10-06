@@ -5,7 +5,7 @@
 import * as path from 'node:path'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { parseUnmergedEntry } from './git-handler-utils'
+import { parseUnmergedEntry } from '../shared/git-status-conflict-entries'
 import type { GitExec } from './git-handler-ops'
 import type { RelayGitStreamExec } from './git-stdout-stream'
 import type { GitUpstreamStatus } from '../shared/git-status-types'
@@ -98,6 +98,8 @@ export async function getStatusOp(
   const statusArgs = [
     '-c',
     'core.quotePath=false',
+    '-c',
+    'diff.autoRefreshIndex=false',
     'status',
     '--porcelain=v2',
     '--branch',
@@ -184,7 +186,7 @@ export async function getStatusOp(
       if (record.type === 'entry') {
         entries.push(record.entry as Record<string, unknown>)
       } else {
-        const entry = parseUnmergedEntry(worktreePath, record.line)
+        const entry = await parseUnmergedEntry(worktreePath, record.line)
         if (entry) {
           entries.push(entry)
         }
@@ -251,7 +253,17 @@ async function runNumstat(
 ): Promise<Map<string, GitLineStats> | null> {
   try {
     const { stdout } = await git(
-      ['-c', 'core.quotePath=false', 'diff', ...(cached ? ['--cached'] : []), '--numstat', '-M'],
+      [
+        '-c',
+        'core.quotePath=false',
+        '-c',
+        'diff.autoRefreshIndex=false',
+        'diff',
+        ...(cached ? ['--cached'] : []),
+        '-z',
+        '--numstat',
+        '-M'
+      ],
       worktreePath,
       { disableOptionalLocks: true, signal }
     )

@@ -12,8 +12,10 @@
  *
  * The oracle is the promotion, not the drop. Without a local catalog there is nowhere to put the
  * rows, and that is fine and recoverable — what is not recoverable is declaring the empty result
- * authoritative, because nothing re-pulls after the lineage lands. An unplaceable row is
- * `unverifiable`, never `exited` (docs/reference/ssh-execution-boundary.md).
+ * authoritative. An unplaceable row is `unverifiable`, never `exited`
+ * (docs/reference/ssh-execution-boundary.md). Getting back to a placed picture is the caller's job:
+ * this apply has no way back once its bounded wait expires, so it reports the paths it dropped and
+ * remote-workspace-target-sync.ts re-pulls when the catalog can place them.
  *
  * The catalog-present case is pinned alongside it so the gate cannot be satisfied by never
  * hydrating anything.
@@ -197,16 +199,25 @@ async function applySnapshot(
   store: TestStore,
   snap: RemoteWorkspaceObservedSnapshot
 ): Promise<void> {
-  await applyDirectSshRemoteWorkspaceSnapshot({
-    store,
-    snapshot: snap,
-    token: token(snap.revision),
-    arrival: 1,
-    isArrivalCurrent: () => true,
-    isPreparationTokenCurrent: () => true,
-    waitForWorkspaceSessionReady: async () => true,
-    finalizeHydratedTerminals: () => 0
-  })
+  vi.useFakeTimers()
+  try {
+    const pending = applyDirectSshRemoteWorkspaceSnapshot({
+      store,
+      snapshot: snap,
+      token: token(snap.revision),
+      arrival: 1,
+      isArrivalCurrent: () => true,
+      isPreparationTokenCurrent: () => true,
+      waitForWorkspaceSessionReady: async () => true,
+      finalizeHydratedTerminals: () => 0
+    })
+    // Exercise the real placement deadline without spending ten wall-clock seconds per snapshot.
+    await vi.advanceTimersByTimeAsync(10_000)
+    await pending
+  } finally {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  }
 }
 
 function adoptedTabIds(store: TestStore): string[] {
@@ -275,7 +286,8 @@ describe('a host snapshot whose terminal tabs cannot be placed locally', () => {
     expect(adoptedTabIds(store), 'no local worktree row exists to hang the host tabs on').toEqual(
       []
     )
-    // Not recoverable: promoting that to truth. Nothing re-pulls once the lineage lands.
+    // Not recoverable: promoting that to truth. This apply never re-pulls on its own; the deferred
+    // placement watch in remote-workspace-target-sync.ts is what re-pulls once the lineage lands.
     expect(
       isHydrated(store),
       'the host named 3 terminals and this client placed none of them, so the target is not hydrated'
@@ -318,6 +330,19 @@ describe('a host snapshot whose terminal tabs cannot be placed locally', () => {
     ).toBe('unverifiable')
   })
 
+  it('answers for the worktrees it placed when the host names another path it cannot place', async () => {
+    const store = createStore()
+    // A second machine left a tab on beta; this client only has alpha.
+    landAlphaLineage(store)
+    await applySnapshot(store, snapshot(1))
+
+    expect(syncPhase(store)).toBe('conflict')
+    expect(isHydrated(store)).toBe(false)
+    expect(adoptedTabIds(store)).toEqual(['T1', 'T2'])
+    expect(resolveWorkspaceTerminalHostAuthority(store.getState(), ALPHA_ID)).toBe('none')
+    expect(resolveWorkspaceTerminalHostAuthority(store.getState(), BETA_ID)).toBe('unverifiable')
+  })
+
   it('adopts every host tab and declares the target hydrated once the catalog is present', async () => {
     const store = createStore()
     landHostLineage(store)
@@ -335,7 +360,7 @@ describe('a host snapshot whose terminal tabs cannot be placed locally', () => {
     const store = createStore()
 
     // First pass: the lineage read was degraded, so nothing places and the target is left
-    // un-hydrated on purpose. With the retry chain gone, this is the only way back.
+    // un-hydrated on purpose. A later snapshot is how this apply, on its own, gets back.
     await applySnapshot(store, snapshot(1))
     expect(adoptedTabIds(store)).toEqual([])
     expect(isHydrated(store)).toBe(false)

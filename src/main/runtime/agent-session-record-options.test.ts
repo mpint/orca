@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { readNativeSessionOptions } from '../native-chat/agent-session-wire/structured-agent-session-option-restoration'
-import { AgentSessionRecordStore } from './agent-session-record-store'
+import { openTestAgentSessionRecordStore } from './agent-session-record-store-test-harness'
+import { codexProviderHandle } from '../../shared/agent-session-provider-handle-encoding'
 
 const NOW = 1_800_000_000_000
 const SESSION = 'session-options'
@@ -31,8 +32,22 @@ it('fails option hydration before ownership can be proved', async () => {
   ).rejects.toThrow('model list unavailable')
 })
 
+it('drops provider-rejected persisted options before the next owner proof', async () => {
+  await expect(
+    readNativeSessionOptions({
+      adapter: {
+        readOptions: async () => ({ models: [], current: { model: 'provider-model' } }),
+        readOptionRestoreFailures: () => ['permissionMode']
+      },
+      sessionId: SESSION,
+      fence: 2,
+      priorOptions: { permissionMode: 'retired-mode', other: 'keep' }
+    })
+  ).resolves.toEqual({ model: 'provider-model', other: 'keep' })
+})
+
 it('persists resumed provider options atomically with owner proof', async () => {
-  const store = await AgentSessionRecordStore.open({ directory, hostId: 'local' })
+  const store = await openTestAgentSessionRecordStore(directory)
   const reserved = await store.reserveOwner({
     sessionId: SESSION,
     location: {
@@ -43,7 +58,6 @@ it('persists resumed provider options atomically with owner proof', async () => 
     },
     provider: 'codex',
     accountHome: { variable: 'CODEX_HOME', path: '/accounts/codex' },
-    runtimeKind: 'native',
     expectedFence: null,
     spawnToken: 'spawn-options',
     claimKeyId: 'key-1',
@@ -83,7 +97,7 @@ it('persists resumed provider options atomically with owner proof', async () => 
     fence,
     link: {
       linkId: 'codex-options-1',
-      handle: { provider: 'codex', threadId: 'thread-options' },
+      handle: codexProviderHandle('thread-options'),
       origin: 'created',
       mintedAtFence: fence,
       observedAt: NOW
@@ -92,6 +106,6 @@ it('persists resumed provider options atomically with owner proof', async () => 
     ...(options ? { options } : {})
   })
 
-  const reopened = await AgentSessionRecordStore.open({ directory, hostId: 'local' })
+  const reopened = await openTestAgentSessionRecordStore(directory)
   expect(reopened.getRecord(SESSION)?.options).toEqual({ model: 'gpt-tui', effort: 'low' })
 })
